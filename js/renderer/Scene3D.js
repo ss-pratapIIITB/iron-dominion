@@ -77,18 +77,45 @@ class Scene3D {
     sky.applyFog = false;
     this._skyMesh = sky;
 
-    // Horizon haze plane — wide flat quad at terrain level to blend edge
-    const haze = BABYLON.MeshBuilder.CreateGround("hazePlane", {
-      width: 260, height: 260, subdivisions: 1,
+    // Dark terrain apron just beyond map edge — 4 tile overhang to hide seam
+    const apron = BABYLON.MeshBuilder.CreateGround("terrainApron", {
+      width: MAP_W + 8, height: MAP_H + 8, subdivisions: 1,
     }, this.scene);
-    haze.position.set(MAP_W / 2, -0.1, MAP_H / 2);
-    haze.isPickable = false;
-    const hazeMat = new BABYLON.StandardMaterial("hazeMat", this.scene);
-    hazeMat.diffuseColor  = new BABYLON.Color3(0.48, 0.65, 0.85);
-    hazeMat.disableLighting = true;
-    hazeMat.alpha = 0.0; // invisible — but extends fog coverage naturally
-    haze.material = hazeMat;
-    haze.applyFog = false;
+    apron.position.set(MAP_W / 2, -0.05, MAP_H / 2);
+    apron.isPickable = false;
+    const apronMat = new BABYLON.StandardMaterial("apronMat", this.scene);
+    apronMat.diffuseColor  = new BABYLON.Color3(0.10, 0.16, 0.08); // very dark green
+    apronMat.specularColor = new BABYLON.Color3(0, 0, 0);
+    apron.material = apronMat;
+
+    // Sparse cloud layer (flat ellipses floating in the sky)
+    this._cloudTime = 0;
+    this._clouds    = [];
+    const cloudMat = new BABYLON.StandardMaterial("cloudMat", this.scene);
+    cloudMat.diffuseColor  = new BABYLON.Color3(1, 1, 1);
+    cloudMat.alpha = 0.55;
+    cloudMat.disableLighting = true;
+    cloudMat.backFaceCulling = false;
+
+    const rng = n => ((Math.sin(n * 127.1) * 43758.5453123) % 1 + 1) % 1;
+    for (let i = 0; i < 14; i++) {
+      const cloud = BABYLON.MeshBuilder.CreateSphere(`cloud${i}`, {
+        diameterX: 8 + rng(i * 3.1) * 10,
+        diameterY: 1.2 + rng(i * 2.7) * 1.0,
+        diameterZ: 4 + rng(i * 5.3) * 7,
+        segments: 4,
+        sideOrientation: BABYLON.Mesh.DOUBLESIDE,
+      }, this.scene);
+      cloud.position.set(
+        -20 + rng(i * 1.1) * (MAP_W + 40),
+        18 + rng(i * 2.2) * 8,
+        -20 + rng(i * 3.3) * (MAP_H + 40)
+      );
+      cloud.material = cloudMat;
+      cloud.isPickable = false;
+      cloud.applyFog   = false;
+      this._clouds.push({ mesh: cloud, baseX: cloud.position.x, speed: 0.0015 + rng(i * 7) * 0.001 });
+    }
   }
 
   // ── Engine + Scene ─────────────────────────────────────────
@@ -1094,7 +1121,16 @@ class Scene3D {
 
   // ── Sync: update 3D scene from game state ─────────────────
   sync(dt) {
-    this._waterTime += dt;
+    this._waterTime  += dt;
+    this._cloudTime  = (this._cloudTime || 0) + dt;
+    // Drift clouds slowly across the sky
+    if (this._clouds) {
+      for (const c of this._clouds) {
+        c.mesh.position.x = c.baseX + this._cloudTime * c.speed;
+        // Wrap around when cloud drifts too far
+        if (c.mesh.position.x > MAP_W + 40) c.mesh.position.x -= MAP_W + 80;
+      }
+    }
     // Animate water shimmer
     if (this._waterMat) {
       const wave = 0.5 + 0.5 * Math.sin(this._waterTime / 900);
