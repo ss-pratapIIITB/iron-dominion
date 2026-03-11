@@ -394,9 +394,41 @@ class Scene3D {
           r = 0.4; g = 0.5; b = 0.3;
         }
 
-        colors[ci]     = r;
-        colors[ci + 1] = g;
-        colors[ci + 2] = b;
+        // Blend colors at terrain-type boundaries for smooth transitions
+        // Check neighboring tiles; if they differ, darken edge vertices slightly
+        let edgeDarken = 0;
+        const neighbors = [
+          game.map.getTile(tx - 1, ty), game.map.getTile(tx + 1, ty),
+          game.map.getTile(tx, ty - 1), game.map.getTile(tx, ty + 1),
+        ];
+        for (const n of neighbors) {
+          if (n !== terrain && n !== undefined && n !== TERRAIN.WATER) {
+            edgeDarken += 0.04; // darken each differing neighbor
+          }
+        }
+        // Blend color of vertex with neighbor tiles for softer terrain transitions
+        let blendR = r, blendG = g, blendB = b;
+        const neighborColors = [];
+        for (const [dnx, dny] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+          const nt = game.map.getTile(tx + dnx, ty + dny);
+          if (nt && nt !== terrain && nt !== TERRAIN.WATER) {
+            let nr, ng, nb;
+            if (nt === TERRAIN.GRASS)    { const c = game.map._grassColor(tx+dnx,ty+dny); [nr,ng,nb] = Scene3D._parseRgb(c); }
+            else if (nt === TERRAIN.DIRT){ const c = game.map._dirtColor(tx+dnx,ty+dny); [nr,ng,nb] = Scene3D._parseRgb(c); }
+            else if (nt === TERRAIN.SAND){ const c = game.map._sandColor(tx+dnx,ty+dny); [nr,ng,nb] = Scene3D._parseRgb(c); }
+            else if (nt === TERRAIN.MOUNTAIN){ const c = game.map._mountainColor(tx+dnx,ty+dny); [nr,ng,nb] = Scene3D._parseRgb(c); }
+            else if (nt === TERRAIN.FOREST){ nr=0.22; ng=0.38; nb=0.18; }
+            else { continue; }
+            blendR = blendR * 0.82 + nr * 0.18;
+            blendG = blendG * 0.82 + ng * 0.18;
+            blendB = blendB * 0.82 + nb * 0.18;
+          }
+        }
+
+        const dark = Math.max(0, 1 - edgeDarken);
+        colors[ci]     = blendR * dark;
+        colors[ci + 1] = blendG * dark;
+        colors[ci + 2] = blendB * dark;
         colors[ci + 3] = 1.0;
       }
     }
@@ -519,19 +551,39 @@ class Scene3D {
       }
     }
 
+    // Water material with scrolling UV for ripple illusion
     const waterMat = new BABYLON.StandardMaterial("waterMat", this.scene);
-    waterMat.diffuseColor  = new BABYLON.Color3(0.15, 0.40, 0.78);
-    waterMat.specularColor = new BABYLON.Color3(0.9, 0.95, 1.0);
-    waterMat.specularPower = 80;
-    waterMat.alpha = 0.90;
+    waterMat.diffuseColor  = new BABYLON.Color3(0.14, 0.38, 0.76);
+    waterMat.specularColor = new BABYLON.Color3(0.95, 0.98, 1.0);
+    waterMat.specularPower = 120;
+    waterMat.alpha = 0.88;
     waterMat.backFaceCulling = false;
+    // Create a simple checkerboard-like diffuse texture from a canvas for ripple look
+    try {
+      const texSize = 64;
+      const texCanvas = document.createElement('canvas');
+      texCanvas.width = texCanvas.height = texSize;
+      const tc = texCanvas.getContext('2d');
+      for (let py = 0; py < texSize; py++) {
+        for (let px = 0; px < texSize; px++) {
+          const wave = Math.sin(px * 0.4) * Math.sin(py * 0.3 + 1.2) * 0.5 + 0.5;
+          const v = Math.round(195 + wave * 35);
+          tc.fillStyle = `rgb(${Math.round(v * 0.22)},${Math.round(v * 0.55)},${v})`;
+          tc.fillRect(px, py, 1, 1);
+        }
+      }
+      const tex = new BABYLON.DynamicTexture("waterTex", texCanvas, this.scene, true);
+      tex.wrapU = tex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+      tex.uScale = 3; tex.vScale = 3;
+      waterMat.diffuseTexture = tex;
+      this._waterTex = tex;
+    } catch (e) { /* fallback to solid color if canvas texture fails */ }
     this._waterMat = waterMat;
 
-    // Create one quad per water tile (or merge for performance)
-    // Merge all water tiles into a single mesh for one draw call
+    // Merge all water tiles into a single draw call
     const waterMeshes = waterTiles.map(({ tx, ty }) => {
       const m = BABYLON.MeshBuilder.CreateGround(`w_${tx}_${ty}`, {
-        width: 1.05, height: 1.05, subdivisions: 1
+        width: 1.05, height: 1.05, subdivisions: 2  // 2 subdivisions for smoother shading
       }, this.scene);
       m.position.x = tx + 0.5;
       m.position.y = -0.28;
@@ -1131,13 +1183,23 @@ class Scene3D {
         if (c.mesh.position.x > MAP_W + 40) c.mesh.position.x -= MAP_W + 80;
       }
     }
-    // Animate water shimmer
+    // Animate water — scroll UV + shimmer specular
     if (this._waterMat) {
-      const wave = 0.5 + 0.5 * Math.sin(this._waterTime / 900);
-      this._waterMat.specularPower = 50 + wave * 80;
-      this._waterMat.alpha = 0.82 + wave * 0.10;
+      const t = this._waterTime;
+      const wave = 0.5 + 0.5 * Math.sin(t / 800);
+      this._waterMat.specularPower = 80 + wave * 80;
+      this._waterMat.alpha = 0.84 + wave * 0.08;
+      // Scroll the water texture UV offset for ripple effect
+      if (this._waterTex) {
+        this._waterTex.uOffset = t * 0.00008;
+        this._waterTex.vOffset = t * 0.00005;
+      }
+      // Subtle color pulse (deeper blue ↔ teal)
       this._waterMat.diffuseColor = new BABYLON.Color3(
-        0.12 + wave * 0.05, 0.38 + wave * 0.06, 0.76 + wave * 0.06);
+        0.12 + wave * 0.04,
+        0.36 + wave * 0.08,
+        0.74 + wave * 0.06
+      );
     }
 
     this._updateCameraFromKeys(dt);
