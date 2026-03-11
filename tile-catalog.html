@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Tile Catalog - Iron Dominion</title>
+<style>
+  body { background: #1a1a2e; color: #eee; font-family: monospace; padding: 20px; }
+  h2 { color: #c8a96e; }
+  .pack { margin-bottom: 40px; }
+  .grid { display: flex; flex-wrap: wrap; gap: 4px; }
+  .tile { text-align: center; }
+  .tile img { display: block; background: #2d4a2d; border: 1px solid #333; }
+  .tile span { font-size: 10px; color: #aaa; }
+</style>
+</head>
+<body>
+<h1>Iron Dominion - Tile Catalog</h1>
+<p>Use this page to identify tile indices for terrain mapping in <code>js/SpriteLoader.js</code></p>
+
+<div class="pack">
+  <h2>Isometric Landscape (landscapeTiles_###.png)</h2>
+  <div class="grid" id="landscape"></div>
+</div>
+
+<div class="pack">
+  <h2>Isometric City (cityTiles_###.png)</h2>
+  <div class="grid" id="city"></div>
+</div>
+
+<script>
+function addTiles(containerId, base, prefix, count) {
+  const container = document.getElementById(containerId);
+  for (let i = 0; i < count; i++) {
+    const num = String(i).padStart(3, '0');
+    const div = document.createElement('div');
+    div.className = 'tile';
+    const img = document.createElement('img');
+    img.src = `${base}/${prefix}${num}.png`;
+    img.width = 66;
+    img.title = `${prefix}${num}`;
+    const span = document.createElement('span');
+    span.textContent = num;
+    div.appendChild(img);
+    div.appendChild(span);
+    container.appendChild(div);
+  }
+}
+addTiles('landscape', 'assets/sprites/isometric-landscape/PNG', 'landscapeTiles_', 128);
+addTiles('city',      'assets/sprites/isometric-city/PNG',      'cityTiles_',      128);
+</script>
+</body>
+</html>

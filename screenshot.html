@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Iron Dominion - Screenshot Capture</title>
+<style>
+body { margin: 0; background: #0a0a14; }
+canvas { display: block; }
+#status { position: fixed; top: 10px; left: 10px; color: #fff; font: 14px monospace; z-index:99; }
+</style>
+</head>
+<body>
+<div id="status">Loading...</div>
+<canvas id="gameCanvas"></canvas>
+
+<!-- Load all game scripts in correct order -->
+<script src="js/constants.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/SpriteLoader.js"></script>
+<script src="js/SpriteRenderer.js"></script>
+<script src="js/Map.js"></script>
+
+<script>
+const W = 1400, H = 700;
+const canvas = document.getElementById('gameCanvas');
+canvas.width = W; canvas.height = H;
+const ctx = canvas.getContext('2d');
+const status = document.getElementById('status');
+
+// Fake camera: zoom to fit the whole map
+const _p = new URLSearchParams(location.search);
+const zoom = parseFloat(_p.get('zoom') || '0.22');
+const focusTx = parseInt(_p.get('tx') || '32');
+const focusTy = parseInt(_p.get('ty') || '32');
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#2d5a27'; // forest green background — seams show terrain color not black
+  ctx.fillRect(0, 0, W, H);
+
+  // Center on focus tile (default: map center)
+  const { x: focusIsoX, y: focusIsoY } = tileToIso(focusTx, focusTy);
+  const offX = W / 2 - focusIsoX * zoom - (ISO_TILE_W / 2) * zoom;
+  const offY = H / 2 - focusIsoY * zoom - (ISO_TILE_H / 2) * zoom;
+
+  ctx.save();
+  ctx.translate(offX, offY);
+  ctx.scale(zoom, zoom);
+
+  // Pass 1: ground terrain tiles — delegate to GameMap._drawIsoTile so Map.js
+  // improvements (smooth grass noise, fringe transitions etc.) are always in sync.
+  for (let sum = 0; sum <= MAP_W + MAP_H - 2; sum++) {
+    for (let tx = 0; tx < MAP_W; tx++) {
+      const ty = sum - tx;
+      if (ty < 0 || ty >= MAP_H) continue;
+      fakeMap._drawIsoTile(ctx, tx, ty);
+    }
+  }
+
+  // Pass 2: tree overlays on forest tiles
+  for (let sum = 0; sum <= MAP_W + MAP_H - 2; sum++) {
+    for (let tx = 0; tx < MAP_W; tx++) {
+      const ty = sum - tx;
+      if (ty < 0 || ty >= MAP_H) continue;
+      if (fakeMap.getTile(tx, ty) === TERRAIN.FOREST) fakeMap._drawTreeOverlay(ctx, tx, ty);
+    }
+  }
+
+  ctx.restore();
+
+  // Draw a legend
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(10, H - 100, 300, 90);
+  ctx.fillStyle = '#c8a96e';
+  ctx.font = '12px monospace';
+  ctx.fillText('Iron Dominion - Map Preview', 16, H - 82);
+  ctx.fillStyle = '#aaa';
+  ctx.fillText(`Tiles: ${MAP_W}×${MAP_H}  Zoom: ${zoom}`, 16, H - 62);
+}
+
+function drawTile(tx, ty) {
+  const terrain = window._map ? window._map.getTile(tx, ty) : 0;
+  const iso = tileToIso(tx, ty);
+  const iw = ISO_TILE_W, ih = ISO_TILE_H;
+  const rx = Math.round(iso.x), ry = Math.round(iso.y);
+
+  // Background diamond
+  ctx.fillStyle = TERRAIN_COLORS[terrain] || '#4a7c59';
+  ctx.beginPath();
+  ctx.moveTo(rx + iw/2, ry);
+  ctx.lineTo(rx + iw, ry + ih/2);
+  ctx.lineTo(rx + iw/2, ry + ih);
+  ctx.lineTo(rx, ry + ih/2);
+  ctx.closePath();
+  ctx.fill();
+
+  // Sprite on top (if loaded)
+  const terrainName = Object.keys(TERRAIN).find(k => TERRAIN[k] === terrain) || 'GRASS';
+  const sprite = SpriteLoader.getTerrainSprite(terrainName, tx, ty);
+  if (sprite) {
+    ctx.drawImage(sprite, rx, ry, iw + 1, ih + 1);
+  }
+
+  // Water shimmer overlay: depth tint + seeded specular highlights
+  if (terrain === TERRAIN.WATER) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(rx + iw/2, ry);
+    ctx.lineTo(rx + iw, ry + ih/2);
+    ctx.lineTo(rx + iw/2, ry + ih);
+    ctx.lineTo(rx, ry + ih/2);
+    ctx.closePath();
+    ctx.clip();
+    const wg = ctx.createRadialGradient(rx + iw*0.38, ry + ih*0.4, 0, rx + iw*0.5, ry + ih*0.5, iw*0.6);
+    wg.addColorStop(0, 'rgba(10,45,85, 0.30)');
+    wg.addColorStop(1, 'rgba(70,150,210, 0.08)');
+    ctx.fillStyle = wg;
+    ctx.fillRect(rx, ry, iw+1, ih+1);
+    const wh = ((tx * 5381 + ty * 9311) >>> 0);
+    for (let s = 0; s < 2; s++) {
+      const seed = ((wh + s * 7919) >>> 0);
+      const sx = rx + iw * 0.28 + (seed % Math.round(iw * 0.44));
+      const sy = ry + ih * 0.28 + ((seed >> 10) % Math.round(ih * 0.44));
+      ctx.globalAlpha = 0.28 + ((seed >> 20) % 15) * 0.01;
+      ctx.fillStyle = '#c8eeff';
+      ctx.beginPath();
+      ctx.ellipse(sx, sy, 2.5, 1.2, 0.25, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // Tree shadow casting: forest tiles behind this tile cast shadows toward SE
+  if (terrain !== TERRAIN.FOREST && terrain !== TERRAIN.WATER) {
+    const shadowSources = [
+      { dtx: -1, dty:  0,
+        gx0: rx + iw * 0.22, gy0: ry + ih * 0.22,
+        gx1: rx + iw * 0.78, gy1: ry + ih * 0.78 },
+      { dtx:  0, dty: -1,
+        gx0: rx + iw * 0.78, gy0: ry + ih * 0.22,
+        gx1: rx + iw * 0.22, gy1: ry + ih * 0.78 },
+    ];
+    for (const e of shadowSources) {
+      const nTerrain = window._map ? window._map.getTile(tx + e.dtx, ty + e.dty) : 0;
+      if (nTerrain !== TERRAIN.FOREST) continue;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(rx + iw/2, ry);
+      ctx.lineTo(rx + iw, ry + ih/2);
+      ctx.lineTo(rx + iw/2, ry + ih);
+      ctx.lineTo(rx, ry + ih/2);
+      ctx.closePath();
+      ctx.clip();
+      const sg = ctx.createLinearGradient(e.gx0, e.gy0, e.gx1, e.gy1);
+      sg.addColorStop(0,   'rgba(0,0,0,0.38)');
+      sg.addColorStop(0.5, 'rgba(0,0,0,0.14)');
+      sg.addColorStop(1,   'rgba(0,0,0,0)');
+      ctx.fillStyle = sg;
+      ctx.fillRect(rx, ry, iw+1, ih+1);
+      ctx.restore();
+    }
+  }
+
+  // Subtle warm color grading + micro-noise on GRASS (AoE2-like muted palette + breaks block seams)
+  if (terrain === TERRAIN.GRASS) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(rx + iw/2, ry);
+    ctx.lineTo(rx + iw, ry + ih/2);
+    ctx.lineTo(rx + iw/2, ry + ih);
+    ctx.lineTo(rx, ry + ih/2);
+    ctx.closePath();
+    ctx.clip();
+    ctx.fillStyle = 'rgba(20,15,0, 0.10)';
+    ctx.fillRect(rx, ry, iw + 1, ih + 1);
+    const tileNoise = ((tx * 374761393 + ty * 1234567891) >>> 0) % 256;
+    if (tileNoise < 80) {
+      ctx.fillStyle = `rgba(0,0,0,${(80 - tileNoise) / 80 * 0.06})`;
+      ctx.fillRect(rx, ry, iw + 1, ih + 1);
+    } else if (tileNoise > 180) {
+      ctx.fillStyle = `rgba(255,255,220,${(tileNoise - 180) / 75 * 0.05})`;
+      ctx.fillRect(rx, ry, iw + 1, ih + 1);
+    }
+    ctx.restore();
+  }
+
+  // Directional depth shading for isometric lighting
+  if (terrain !== TERRAIN.WATER) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(rx + iw/2, ry);
+    ctx.lineTo(rx + iw, ry + ih/2);
+    ctx.lineTo(rx + iw/2, ry + ih);
+    ctx.lineTo(rx, ry + ih/2);
+    ctx.closePath();
+    ctx.clip();
+    const depthGrad = ctx.createLinearGradient(rx, ry, rx + iw, ry + ih);
+    const isGrass = terrain === TERRAIN.GRASS;
+    depthGrad.addColorStop(0,    isGrass ? 'rgba(255,255,255,0.07)' : 'rgba(255,255,255,0.10)');
+    depthGrad.addColorStop(0.42, 'rgba(0,0,0,0.00)');
+    depthGrad.addColorStop(1,    isGrass ? 'rgba(0,0,0,0.16)' : 'rgba(0,0,0,0.22)');
+    ctx.fillStyle = depthGrad;
+    ctx.fillRect(rx, ry, iw + 1, ih + 1);
+    ctx.restore();
+  }
+
+  // Farmland furrow detail: subtle plowed-row banding on DIRT tiles
+  if (terrain === TERRAIN.DIRT) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(rx + iw / 2, ry);
+    ctx.lineTo(rx + iw,     ry + ih / 2);
+    ctx.lineTo(rx + iw / 2, ry + ih);
+    ctx.lineTo(rx,          ry + ih / 2);
+    ctx.closePath();
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(55,30,8, 0.20)';
+    ctx.lineWidth = 0.8;
+    for (let i = 1; i <= 3; i++) {
+      const lineY = ry + ih * (i / 4);
+      ctx.beginPath();
+      ctx.moveTo(rx, lineY);
+      ctx.lineTo(rx + iw, lineY);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Stone cobblestone texture on MOUNTAIN (road/plaza) tiles
+  if (terrain === TERRAIN.MOUNTAIN) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(rx + iw / 2, ry);
+    ctx.lineTo(rx + iw,     ry + ih / 2);
+    ctx.lineTo(rx + iw / 2, ry + ih);
+    ctx.lineTo(rx,          ry + ih / 2);
+    ctx.closePath();
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(60,60,65, 0.22)';
+    ctx.lineWidth = 0.7;
+    for (let i = 1; i <= 3; i++) {
+      const lineY = ry + ih * (i / 4);
+      ctx.beginPath();
+      ctx.moveTo(rx, lineY);
+      ctx.lineTo(rx + iw, lineY);
+      ctx.stroke();
+    }
+    const seed = ((tx * 1664525 + ty * 22695477) >>> 0);
+    const offset = (seed % 2) ? iw * 0.25 : 0;
+    ctx.lineWidth = 0.5;
+    for (let i = 0; i <= 3; i++) {
+      const lx = rx + (i / 3) * iw + offset;
+      ctx.beginPath();
+      ctx.moveTo(lx, ry);
+      ctx.lineTo(lx, ry + ih);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Sandy grain texture on SAND (path shoulder) tiles
+  if (terrain === TERRAIN.SAND) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(rx + iw / 2, ry);
+    ctx.lineTo(rx + iw,     ry + ih / 2);
+    ctx.lineTo(rx + iw / 2, ry + ih);
+    ctx.lineTo(rx,          ry + ih / 2);
+    ctx.closePath();
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(90,60,20, 0.28)';
+    ctx.lineWidth = 0.8;
+    const sandSeed = ((tx * 2246822519 + ty * 3266489917) >>> 0);
+    const waveShift = (sandSeed % 4) * 2;
+    for (let i = 0; i <= 4; i++) {
+      const lineY = ry + ih * (i / 4) + waveShift * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(rx,        lineY + 1.5);
+      ctx.quadraticCurveTo(rx + iw * 0.5, lineY - 1.5, rx + iw, lineY + 1.5);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Terrain edge transitions: data-driven gradient fringe for multiple terrain types
+  const FRINGE_MAP = {
+    [TERRAIN.GRASS]: {
+      [TERRAIN.SAND]:     'rgba(145,108,68, 0.55)',
+      [TERRAIN.DIRT]:     'rgba(145,108,68, 0.55)',
+      [TERRAIN.MOUNTAIN]: 'rgba(80,75,70, 0.45)',
+      [TERRAIN.FOREST]:   'rgba(30,60,20, 0.50)',
+      [TERRAIN.WATER]:    'rgba(60,120,180, 0.40)',
+    },
+    [TERRAIN.DIRT]: {
+      [TERRAIN.GRASS]:    'rgba(60,100,40, 0.40)',
+    },
+    [TERRAIN.SAND]: {
+      [TERRAIN.GRASS]:    'rgba(60,100,40, 0.35)',
+    },
+    [TERRAIN.FOREST]: {
+      [TERRAIN.GRASS]:    'rgba(55,110,30, 0.38)',
+      [TERRAIN.DIRT]:     'rgba(55,110,30, 0.28)',
+    },
+    [TERRAIN.MOUNTAIN]: {
+      [TERRAIN.GRASS]:    'rgba(55,90,35, 0.32)',
+      [TERRAIN.DIRT]:     'rgba(80,65,50, 0.35)',
+      [TERRAIN.SAND]:     'rgba(120,100,60, 0.38)',
+    },
+    [TERRAIN.WATER]: {
+      [TERRAIN.GRASS]:    'rgba(40,140,80, 0.30)',
+      [TERRAIN.SAND]:     'rgba(140,120,70, 0.32)',
+    },
+  };
+  const fringeSet = FRINGE_MAP[terrain];
+  if (fringeSet) {
+    const cx0 = rx + iw / 2, cy0 = ry + ih / 2;
+    const blendEdges = [
+      { dtx: +1, dty:  0, gx0: rx + iw,        gy0: ry + ih/2,    gx1: cx0 + iw*0.15, gy1: cy0 },
+      { dtx:  0, dty: +1, gx0: rx,              gy0: ry + ih/2,    gx1: cx0 - iw*0.15, gy1: cy0 },
+      { dtx: -1, dty:  0, gx0: rx + iw * 0.25,  gy0: ry + ih*0.25, gx1: cx0,           gy1: cy0 },
+      { dtx:  0, dty: -1, gx0: rx + iw * 0.75,  gy0: ry + ih*0.25, gx1: cx0,           gy1: cy0 },
+    ];
+    for (const e of blendEdges) {
+      const nTerrain = window._map ? window._map.getTile(tx + e.dtx, ty + e.dty) : 0;
+      const fringeColor = fringeSet[nTerrain];
+      if (!fringeColor) continue;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(rx + iw/2, ry);
+      ctx.lineTo(rx + iw, ry + ih/2);
+      ctx.lineTo(rx + iw/2, ry + ih);
+      ctx.lineTo(rx, ry + ih/2);
+      ctx.closePath();
+      ctx.clip();
+      const tg = ctx.createLinearGradient(e.gx0, e.gy0, e.gx1, e.gy1);
+      tg.addColorStop(0, fringeColor);
+      tg.addColorStop(1, fringeColor.replace(/[\d.]+\)$/, '0)'));
+      ctx.fillStyle = tg;
+      ctx.fillRect(rx, ry, iw + 1, ih + 1);
+      ctx.restore();
+    }
+  }
+}
+
+function drawTreeOverlay(tx, ty) {
+  const iso = tileToIso(tx, ty);
+  const iw = ISO_TILE_W, ih = ISO_TILE_H;
+  const rx = Math.round(iso.x), ry = Math.round(iso.y);
+
+  const h = ((tx * 1664525 + ty * 1013904223) >>> 0);
+  const variant = h % 4;
+  const jitter = (h >> 8) % 4;
+
+  const tcx = rx + iw / 2 + ((h >> 12) % 5) - 2;
+  const baseY = ry + ih * 0.45;
+  const trunkH = Math.round(ih * 0.85) + (jitter % 4);
+  const crownW = Math.round(iw * 0.34) + (jitter % 5);
+  const crownH = Math.round(ih * 1.25) + (jitter % 6);
+  const crownY = baseY - trunkH - crownH * 0.62;
+
+  // Ground shadow
+  ctx.save();
+  ctx.globalAlpha = 0.22;
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.ellipse(tcx + 3, baseY + 1, crownW * 0.85, ih * 0.22, 0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Trunk
+  ctx.fillStyle = '#3a1f08';
+  ctx.fillRect(tcx - 2, baseY - trunkH, 3, trunkH + 1);
+
+  // Shadow crown
+  ctx.fillStyle = '#142d07';
+  ctx.beginPath();
+  ctx.ellipse(tcx + 2, crownY + 3, crownW, crownH, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mid crown
+  const greens = ['#2d5c10', '#2f6213', '#28560d', '#356618'];
+  ctx.fillStyle = greens[variant];
+  ctx.beginPath();
+  ctx.ellipse(tcx, crownY, crownW, crownH, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Secondary foliage
+  const greens2 = ['#346e12', '#3a7214', '#30680f', '#3d7a1a'];
+  ctx.fillStyle = greens2[variant];
+  ctx.beginPath();
+  ctx.ellipse(tcx - 1, crownY - crownH * 0.12, crownW * 0.78, crownH * 0.72, -0.15, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Highlight
+  ctx.fillStyle = '#52a025';
+  ctx.beginPath();
+  ctx.ellipse(tcx - crownW * 0.22, crownY - crownH * 0.26, crownW * 0.44, crownH * 0.38, -0.25, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// Generate map and render
+const fakeMap = new GameMap();
+fakeMap.generate();
+window._map = fakeMap;
+
+// Load sprites then render
+SpriteLoader.init(() => {
+  status.textContent = 'Sprites loaded ✓ Rendering...';
+  render();
+
+  // Export as image and show in page for screenshot
+  const dataUrl = canvas.toDataURL('image/png');
+
+  // Signal to headless Chrome that we're done
+  document.title = 'SCREENSHOT_READY';
+  status.textContent = 'DONE ✓ — ' + new Date().toISOString();
+
+  // Also make a download link
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = 'map_preview.png';
+  a.textContent = 'Download PNG';
+  a.style = 'position:fixed;top:50px;left:10px;color:#4f8;font:14px monospace;z-index:99';
+  document.body.appendChild(a);
+});
+
+status.textContent = 'Loading sprites... ' + SpriteLoader.getProgress().toFixed(0) + '%';
+</script>
+</body>
+</html>

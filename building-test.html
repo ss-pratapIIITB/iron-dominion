@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Iron Dominion - Building Test</title>
+<style>body { margin:0; background:#1a1a2a; }</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="js/constants.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/SpriteLoader.js"></script>
+<script src="js/SpriteRenderer.js"></script>
+<script src="js/Map.js"></script>
+<script>
+const W = 1400, H = 950;
+const canvas = document.getElementById('c');
+canvas.width = W; canvas.height = H;
+const ctx = canvas.getContext('2d');
+window.lerp = (a, b, t) => a + (b - a) * t;
+
+const BUILDINGS = [
+  'TOWN_CENTER','HOUSE','BARRACKS','ARCHERY_RANGE',
+  'STABLE','BLACKSMITH','LUMBER_CAMP','MINING_CAMP',
+  'MILL','TOWER','SIEGE_WORKSHOP','WALL'
+];
+
+function drawGrassPad(cx, cy, sz) {
+  const iw = ISO_TILE_W * (sz + 1), ih = ISO_TILE_H * (sz + 1);
+  for (let v = 0; v < 4; v++) {
+    const tile = SpriteR.getTerrainTile(TERRAIN.GRASS, 0, 0);
+    // grass base color
+    ctx.fillStyle = '#5a8c62';
+    ctx.beginPath();
+    ctx.moveTo(cx,         cy - ih/2);
+    ctx.lineTo(cx + iw/2,  cy);
+    ctx.lineTo(cx,         cy + ih/2);
+    ctx.lineTo(cx - iw/2,  cy);
+    ctx.closePath();
+    ctx.fill();
+    if (tile) ctx.drawImage(tile, cx - iw/2, cy - ih/2, iw, ih);
+  }
+}
+
+function render() {
+  ctx.fillStyle = '#1a1a2a';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = '#e8d090';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('Iron Dominion — Building Showcase', 20, 36);
+
+  const cols = 4;
+  const padX = 80, padY = 280;  // extra top padding for tall Town Center
+  const colW = (W - padX) / cols;
+  const rowH = 260;
+
+  BUILDINGS.forEach((type, i) => {
+    const col = i % cols, row = Math.floor(i / cols);
+    const cx = padX/2 + col * colW + colW/2;
+    const cy = padY + row * rowH + 80;
+
+    const def = BUILDING_DEFS[type];
+    if (!def) return;
+    const sz = def.size;
+    const iw = ISO_TILE_W * sz, ih = ISO_TILE_H * sz;
+
+    // Green ground pad
+    const padW = iw * 1.6, padH = ih * 1.6;
+    ctx.fillStyle = '#4a7a50';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - padH * 0.7);
+    ctx.lineTo(cx + padW * 0.6, cy);
+    ctx.lineTo(cx, cy + padH * 0.5);
+    ctx.lineTo(cx - padW * 0.6, cy);
+    ctx.closePath();
+    ctx.fill();
+
+    // Building iso top-left
+    const heightU = sz * ISO_TILE_H * (
+      type === 'TOWN_CENTER' ? 1.8 :
+      type === 'TOWER' ? 2.4 :
+      type === 'BARRACKS' ? 1.4 :
+      type === 'STABLE' ? 1.2 :
+      type === 'ARCHERY_RANGE' ? 1.3 :
+      type === 'SIEGE_WORKSHOP' ? 1.4 :
+      type === 'BLACKSMITH' ? 1.3 :
+      type === 'FARM' ? 0.3 :
+      type === 'WALL' ? 0.8 : 1.0
+    );
+
+    const isoTL = { x: cx - iw/2, y: cy - ih/2 - heightU * 0.3 };
+    const isoCenter = { x: cx, y: cy };
+    const building = { type, size: sz, playerId: i % 2, built: true, buildProgress: 100 };
+
+    SpriteR.drawBuilding(ctx, building, null, isoTL, isoCenter);
+
+    // Label
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.fillRect(cx - 75, cy + ih * 0.5 + heightU * 0.05, 150, 22);
+    ctx.fillStyle = '#e8c060';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(type.replace(/_/g, ' '), cx, cy + ih * 0.5 + heightU * 0.05 + 15);
+    ctx.textAlign = 'left';
+  });
+}
+
+SpriteR.init();
+SpriteLoader.init(() => { render(); });
+</script>
+</body>
+</html>
