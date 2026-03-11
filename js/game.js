@@ -251,7 +251,9 @@ class Game {
   }
 
   // ── Game Loop ─────────────────────────────────────────────
+  // In 3D mode, start() is a no-op — Scene3D owns the render loop.
   start() {
+    if (this.scene3D) return; // Scene3D drives the loop
     this.lastTime = performance.now();
     requestAnimationFrame(t => this._loop(t));
   }

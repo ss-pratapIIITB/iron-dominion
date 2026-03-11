@@ -13,15 +13,31 @@
       user-select: none;
       -webkit-user-select: none;
     }
-    #gameCanvas {
+    #gameContainer {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+    }
+    /* Babylon.js WebGL canvas — 3D world */
+    #glCanvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
       display: block;
-      cursor: default;
+    }
+    /* 2D overlay canvas — UI, minimap, HUD, fog (drawn as 2D UI) */
+    #uiCanvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      display: block;
+      pointer-events: none; /* clicks pass through to 3D canvas */
     }
     #loadingScreen {
       position: fixed;
       top: 0; left: 0;
       width: 100%; height: 100%;
-      background: #0a0a1a;
+      background: #080610;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -30,34 +46,34 @@
       z-index: 100;
     }
     #loadingScreen h1 {
-      font-size: 48px;
+      font-size: 52px;
       color: #c8a94e;
-      text-shadow: 0 0 20px #c8a94e88;
-      margin-bottom: 16px;
-      letter-spacing: 4px;
+      text-shadow: 0 0 30px #c8a94e88, 0 0 60px #c8a94e44;
+      margin-bottom: 12px;
+      letter-spacing: 6px;
     }
     #loadingScreen p {
-      font-size: 16px;
+      font-size: 15px;
       color: #888;
       margin-bottom: 32px;
     }
     .loading-bar-bg {
-      width: 300px;
-      height: 8px;
-      background: #222;
-      border-radius: 4px;
+      width: 320px;
+      height: 6px;
+      background: #1a1a2a;
+      border-radius: 3px;
       overflow: hidden;
+      border: 1px solid #333;
     }
     .loading-bar-fill {
       height: 100%;
-      background: linear-gradient(90deg, #c8a94e, #f0d060);
-      border-radius: 4px;
+      background: linear-gradient(90deg, #8a6a20, #c8a94e, #f0d060);
+      border-radius: 3px;
       width: 0%;
-      transition: width 0.3s ease;
+      transition: width 0.4s ease;
     }
   </style>
   <script>
-    // Send browser errors to server for debugging
     window.onerror = function(msg, src, line, col, err) {
       fetch('/__log', { method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ level:'error', msg: msg + ' @ ' + src + ':' + line, stack: err && err.stack }) });
@@ -69,27 +85,38 @@
         body: JSON.stringify({ level:'error', msg: args.map(String).join(' ') }) });
     };
   </script>
+
+  <!-- ── Babylon.js 7 (stable, full game engine) ── -->
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+  <script src="https://cdn.babylonjs.com/materialsLibrary/babylonjs.materials.min.js"></script>
 </head>
 <body>
   <div id="loadingScreen">
     <h1>IRON DOMINION</h1>
-    <p>Initializing world...</p>
+    <p>Building 3D world...</p>
     <div class="loading-bar-bg">
       <div class="loading-bar-fill" id="loadingBar"></div>
     </div>
   </div>
-  <canvas id="gameCanvas"></canvas>
+
+  <div id="gameContainer">
+    <!-- Babylon.js 3D canvas (bottom layer) -->
+    <canvas id="glCanvas" oncontextmenu="return false;"></canvas>
+    <!-- 2D UI overlay (top layer, pointer-events:none so clicks go to 3D canvas) -->
+    <canvas id="uiCanvas"></canvas>
+  </div>
 
   <!-- Core constants and utilities -->
   <script src="js/constants.js"></script>
   <script src="js/utils.js"></script>
   <script src="js/Sound.js"></script>
 
-  <!-- Sprite loader (Kenney CC0 assets) and renderer -->
+  <!-- Legacy 2D renderer kept for UI minimap helpers -->
   <script src="js/SpriteLoader.js"></script>
   <script src="js/SpriteRenderer.js"></script>
 
-  <!-- Map and environment -->
+  <!-- Map logic (generation + color helpers) -->
   <script src="js/Map.js"></script>
   <script src="js/Pathfinder.js"></script>
   <script src="js/FogOfWar.js"></script>
@@ -97,7 +124,7 @@
   <!-- Player state -->
   <script src="js/Player.js"></script>
 
-  <!-- Entities -->
+  <!-- Entities (logic only — render() methods still exist but not called in 3D mode) -->
   <script src="js/entities/Entity.js"></script>
   <script src="js/entities/Unit.js"></script>
   <script src="js/entities/Building.js"></script>
@@ -111,8 +138,11 @@
   <script src="js/systems/AIController.js"></script>
   <script src="js/systems/UIManager.js"></script>
 
+  <!-- 3D Renderer -->
+  <script src="js/renderer/Scene3D.js"></script>
+
   <!-- Main game -->
-  <script src="js/Game.js"></script>
+  <script src="js/game.js"></script>
   <script src="js/main.js"></script>
 </body>
 </html>
