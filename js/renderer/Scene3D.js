@@ -1394,21 +1394,21 @@ class Scene3D {
     const self    = this;
     const origCam = game.camera;
 
-    // Override screenToWorld to use Babylon.js picking
+    // Override screenToWorld to use Babylon.js picking.
+    // NOTE: glCanvas fills the full window — NO UI_TOP_H offset here.
+    // The 2D camera used sy-UI_TOP_H because its world-space was offset by the HUD,
+    // but in 3D the Babylon engine works in raw canvas pixel coordinates.
     origCam.screenToWorld = (sx, sy) => {
-      // Pick against terrain plane at y=0
-      const pick = self.scene.pick(sx, sy - UI_TOP_H, m => m.name === 'terrain');
+      const pick = self.scene.pick(sx, sy, m => m.name === 'terrain');
       if (pick && pick.hit && pick.pickedPoint) {
-        const tx = pick.pickedPoint.x;
-        const ty = pick.pickedPoint.z;
-        // Convert tile coords → sim pixel coords → iso world coords
-        const simX = tx * TILE_SIZE;
-        const simY = ty * TILE_SIZE;
-        const iso = simToIso(simX, simY);
+        // pickedPoint is in tile-space (world units = tiles in our setup)
+        const simX = pick.pickedPoint.x * TILE_SIZE;
+        const simY = pick.pickedPoint.z * TILE_SIZE;
+        const iso  = simToIso(simX, simY);
         return { wx: iso.x, wy: iso.y };
       }
-      // Fallback: project to ground plane manually
-      return { wx: sx, wy: sy };
+      // Fallback: return zero so hit tests simply miss (better than garbage coords)
+      return { wx: -99999, wy: -99999 };
     };
 
     // Override pan to move 3D camera
@@ -1445,6 +1445,38 @@ class Scene3D {
 
     // Override update to do nothing (3D camera managed by Scene3D)
     origCam.update = () => {};
+
+    // Override drag-select: project each unit's 3D position to screen space
+    // (the original uses 2D camera math which doesn't apply in 3D mode)
+    game.input._handleDragSelect = () => {
+      const x1 = Math.min(game.input.dragStartX, game.input.dragEndX);
+      const x2 = Math.max(game.input.dragStartX, game.input.dragEndX);
+      const y1 = Math.min(game.input.dragStartY, game.input.dragEndY);
+      const y2 = Math.max(game.input.dragStartY, game.input.dragEndY);
+      if (x2 - x1 < 4 && y2 - y1 < 4) return; // too tiny to be a real drag
+
+      game.selection.clearAll();
+      const rw = self.engine.getRenderWidth();
+      const rh = self.engine.getRenderHeight();
+      const viewport = self.camera3d.viewport.toGlobal(rw, rh);
+      const transformMat = self.scene.getTransformMatrix();
+
+      for (const u of game.players[0].units) {
+        if (u.dead || u.garrisoned) continue;
+        const wx3 = u.x / TILE_SIZE;
+        const wz3 = u.y / TILE_SIZE;
+        const wy3 = 0.5; // approximate unit height midpoint
+        const worldPos = new BABYLON.Vector3(wx3, wy3, wz3);
+        const screen = BABYLON.Vector3.Project(
+          worldPos, BABYLON.Matrix.Identity(), transformMat, viewport
+        );
+        if (screen.x >= x1 && screen.x <= x2 && screen.y >= y1 && screen.y <= y2) {
+          game.selection.selected.add(u);
+          u.selected = true;
+        }
+      }
+      if (game.selection.selected.size > 0 && typeof Sound !== 'undefined') Sound.select();
+    };
   }
 
   // ── Render Loop ────────────────────────────────────────────
