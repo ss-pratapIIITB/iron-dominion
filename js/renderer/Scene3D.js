@@ -49,12 +49,46 @@ class Scene3D {
     this._initEngine();
     this._initCamera();
     this._initLighting();
+    this._initSky();
     this._initTerrain();
     this._initWater();
     this._initFogPlane();
     this._initResourceNodes();
     this._patchGameCamera();
     this._startRenderLoop();
+  }
+
+  // ── Sky Dome ────────────────────────────────────────────────
+  _initSky() {
+    // Large inverted sphere for sky gradient (backface visible inside)
+    const sky = BABYLON.MeshBuilder.CreateSphere("skyDome", {
+      diameter: 220, segments: 10, sideOrientation: BABYLON.Mesh.BACKSIDE,
+    }, this.scene);
+    sky.position.set(MAP_W / 2, -20, MAP_H / 2);
+    sky.isPickable = false;
+
+    const skyMat = new BABYLON.StandardMaterial("skyDomeMat", this.scene);
+    skyMat.disableLighting = true;
+    skyMat.backFaceCulling = false;
+    skyMat.diffuseColor  = new BABYLON.Color3(0, 0, 0);
+    skyMat.emissiveColor = new BABYLON.Color3(0.48, 0.68, 0.92); // sky blue
+    sky.material = skyMat;
+    // Mark so fog doesn't affect the sky sphere itself
+    sky.applyFog = false;
+    this._skyMesh = sky;
+
+    // Horizon haze plane — wide flat quad at terrain level to blend edge
+    const haze = BABYLON.MeshBuilder.CreateGround("hazePlane", {
+      width: 260, height: 260, subdivisions: 1,
+    }, this.scene);
+    haze.position.set(MAP_W / 2, -0.1, MAP_H / 2);
+    haze.isPickable = false;
+    const hazeMat = new BABYLON.StandardMaterial("hazeMat", this.scene);
+    hazeMat.diffuseColor  = new BABYLON.Color3(0.48, 0.65, 0.85);
+    hazeMat.disableLighting = true;
+    hazeMat.alpha = 0.0; // invisible — but extends fog coverage naturally
+    haze.material = hazeMat;
+    haze.applyFog = false;
   }
 
   // ── Engine + Scene ─────────────────────────────────────────
@@ -65,8 +99,15 @@ class Scene3D {
       antialias: true,
     });
     this.scene = new BABYLON.Scene(this.engine);
-    this.scene.clearColor = new BABYLON.Color4(0.15, 0.12, 0.1, 1);
-    this.scene.ambientColor = new BABYLON.Color3(0.4, 0.45, 0.35);
+    // AoE2-style sky blue background
+    this.scene.clearColor  = new BABYLON.Color4(0.45, 0.65, 0.90, 1);
+    this.scene.ambientColor = new BABYLON.Color3(0.35, 0.38, 0.30); // lower ambient → more contrast
+
+    // Very subtle linear fog only at map edges — most of the map stays crisp
+    this.scene.fogMode  = BABYLON.Scene.FOGMODE_LINEAR;
+    this.scene.fogColor = new BABYLON.Color3(0.60, 0.78, 0.94);
+    this.scene.fogStart = MAP_W * 0.85;  // 85% across — only the very far edge hazes
+    this.scene.fogEnd   = MAP_W * 1.40;
 
     // Optimizations
     this.scene.skipPointerMovePicking = false;
@@ -170,19 +211,19 @@ class Scene3D {
   _initLighting() {
     // Directional sunlight from NW (classic RTS sun angle)
     const sun = new BABYLON.DirectionalLight("sun",
-      new BABYLON.Vector3(-1, -2.5, -1), this.scene);
-    sun.position = new BABYLON.Vector3(MAP_W * 0.3, 40, MAP_H * 0.3);
-    sun.intensity = 1.4;
-    sun.diffuse   = new BABYLON.Color3(1.0, 0.95, 0.82);
-    sun.specular  = new BABYLON.Color3(0.2, 0.18, 0.12);
+      new BABYLON.Vector3(-1, -2.8, -0.8), this.scene);
+    sun.position  = new BABYLON.Vector3(MAP_W * 0.3, 40, MAP_H * 0.3);
+    sun.intensity = 1.9;  // strong directional sun = rich shadows + vivid colors
+    sun.diffuse   = new BABYLON.Color3(1.0, 0.97, 0.85); // warm daylight
+    sun.specular  = new BABYLON.Color3(0.30, 0.26, 0.16);
     this._sun = sun;
 
-    // Sky ambient — brighter so terrain colors are visible
+    // Sky ambient — fills shadows with blue sky light
     const sky = new BABYLON.HemisphericLight("sky",
       new BABYLON.Vector3(0, 1, 0), this.scene);
-    sky.intensity    = 0.85;
-    sky.diffuse      = new BABYLON.Color3(0.88, 0.92, 1.0);
-    sky.groundColor  = new BABYLON.Color3(0.55, 0.50, 0.40);
+    sky.intensity    = 0.55; // lower fill → more dramatic shadows
+    sky.diffuse      = new BABYLON.Color3(0.72, 0.82, 1.0);
+    sky.groundColor  = new BABYLON.Color3(0.45, 0.40, 0.32);
 
     // Shadow generator — soft shadows for quality AoE2 look
     this._shadows = new BABYLON.ShadowGenerator(2048, sun);
@@ -192,6 +233,42 @@ class Scene3D {
     // Subtle bloom: glow around brighter objects (building highlights, water)
     const glow = new BABYLON.GlowLayer("glow", this.scene);
     glow.intensity = 0.25;
+
+    // SSAO2 for ambient occlusion depth (adds soil/shadow under buildings/trees)
+    try {
+      const ssao = new BABYLON.SSAO2RenderingPipeline("ssao", this.scene, {
+        ssaoRatio: 0.5,  // half-res for perf
+        blurRatio: 1.0,
+      }, [this.camera3d]);
+      ssao.radius             = 1.8;
+      ssao.totalStrength      = 1.1;
+      ssao.base               = 0.10;
+      ssao.maxZ               = 80;
+      ssao.minZAspect         = 0.2;
+      ssao.samples            = 8;
+      ssao.expensiveBlur      = false;
+      this._ssao = ssao;
+    } catch (e) {
+      console.warn('[Scene3D] SSAO unavailable:', e.message);
+    }
+
+    // Default rendering pipeline for tone-mapping + slight bloom
+    try {
+      const pipeline = new BABYLON.DefaultRenderingPipeline(
+        "defaultPipeline", true, this.scene, [this.camera3d]);
+      pipeline.bloomEnabled       = true;
+      pipeline.bloomThreshold     = 0.80;
+      pipeline.bloomWeight        = 0.18;
+      pipeline.bloomKernel        = 24;
+      pipeline.bloomScale         = 0.5;
+      pipeline.imageProcessingEnabled = true;
+      pipeline.imageProcessing.contrast   = 1.18;  // richer contrast
+      pipeline.imageProcessing.exposure   = 0.98;  // slightly reduce to avoid blow-out
+      pipeline.imageProcessing.toneMappingEnabled = true;
+      this._pipeline = pipeline;
+    } catch (e) {
+      console.warn('[Scene3D] Default pipeline unavailable:', e.message);
+    }
   }
 
   // ── Terrain ────────────────────────────────────────────────
@@ -318,31 +395,52 @@ class Scene3D {
     if (this._treeMaster)  { this._treeMaster.dispose(); this._treeMaster = null; }
     if (this._treeMaster2) { this._treeMaster2.dispose(); this._treeMaster2 = null; }
 
-    // Two tree varieties — dark pine and rounded deciduous
-    const makeTremaster = (name, trunkH, canopyD, canopyY) => {
+    // Two tree varieties — tall pine and rounded deciduous
+    // Each has 3 layered canopy spheres for a fuller, more natural look
+    const makeTremaster = (name, trunkH, canopyD, canopyY, darkG, midG, lightG) => {
+      const parts = [];
+      // Trunk (tapered cylinder)
       const trunk = BABYLON.MeshBuilder.CreateCylinder(name + "Tr", {
-        height: trunkH, diameterTop: 0.12, diameterBottom: 0.22, tessellation: 6
+        height: trunkH, diameterTop: 0.10, diameterBottom: 0.24, tessellation: 7
       }, this.scene);
-      const canopy = BABYLON.MeshBuilder.CreateSphere(name + "Ca", {
-        diameter: canopyD, segments: 6
+      parts.push(trunk);
+      // Bottom canopy layer — widest, flattened
+      const bot = BABYLON.MeshBuilder.CreateSphere(name + "CaB", {
+        diameter: canopyD * 1.20, segments: 5
       }, this.scene);
-      canopy.position.y = canopyY;
-      const master = BABYLON.Mesh.MergeMeshes([trunk, canopy], true, true);
+      bot.position.y = canopyY - 0.28;
+      bot.scaling.y  = 0.65; // flatten for umbrella shape
+      parts.push(bot);
+      // Middle canopy
+      const mid = BABYLON.MeshBuilder.CreateSphere(name + "CaM", {
+        diameter: canopyD * 0.88, segments: 5
+      }, this.scene);
+      mid.position.y = canopyY + 0.12;
+      parts.push(mid);
+      // Top canopy — narrower, pointed
+      const top = BABYLON.MeshBuilder.CreateSphere(name + "CaT", {
+        diameter: canopyD * 0.52, segments: 4
+      }, this.scene);
+      top.position.y = canopyY + 0.58;
+      top.scaling.y  = 1.3; // stretch up
+      parts.push(top);
+
+      const master = BABYLON.Mesh.MergeMeshes(parts, true, true);
       master.name = name;
       master.isVisible = false;
       const mat = new BABYLON.StandardMaterial(name + "Mat", this.scene);
-      mat.diffuseColor  = new BABYLON.Color3(0.15, 0.36, 0.12);
+      mat.diffuseColor  = new BABYLON.Color3(midG * 0.25, midG, midG * 0.18);
       mat.specularColor = new BABYLON.Color3(0.02, 0.04, 0.02);
       master.material = mat;
       master.receiveShadows = true;
       this._shadows.addShadowCaster(master);
       return master;
     };
-    const treeMaster  = makeTremaster("treeMasterA", 1.4, 1.6, 1.3);
-    const treeMaster2 = makeTremaster("treeMasterB", 1.0, 2.0, 0.9);
-    treeMaster2.material.diffuseColor = new BABYLON.Color3(0.18, 0.42, 0.16);
-
-    this._shadows.addShadowCaster(treeMaster);
+    // Pine: taller trunk, narrower canopy, darker green
+    const treeMaster  = makeTremaster("treeMasterA", 1.5, 1.4, 1.35, 0.10, 0.32, 0.20);
+    // Deciduous: shorter trunk, wider fuller canopy, brighter green
+    const treeMaster2 = makeTremaster("treeMasterB", 1.0, 1.9, 1.05, 0.14, 0.40, 0.28);
+    treeMaster2.material.diffuseColor = new BABYLON.Color3(0.14, 0.40, 0.14);
 
     // RNG seeded by tile position (matches our existing tree placement)
     const rng = (x, y, seed = 0) => (((x * 1664525 + y * 1013904223 + seed * 22695477) >>> 0) / 4294967295);
@@ -426,14 +524,27 @@ class Scene3D {
 
   // ── Fog of War Plane ───────────────────────────────────────
   _initFogPlane() {
-    // Flat plane over entire map, vertex colors drive fog opacity
+    // Fog plane is LARGER than the map so it hides the sky beyond map edges.
+    // The extra border (MARGIN tiles on each side) is always fully opaque black.
     const W = MAP_W, H = MAP_H;
+    const MARGIN = 24; // tiles of always-black fog surrounding the map
+    const FW = W + MARGIN * 2;
+    const FH = H + MARGIN * 2;
+    const SUB = FW; // subdivisions = width for one vertex per tile
+
     const fog = BABYLON.MeshBuilder.CreateGround("fogPlane", {
-      width: W, height: H, subdivisions: W
+      width: FW, height: FH, subdivisions: SUB
     }, this.scene);
-    fog.position.x = W / 2;
-    fog.position.y = 3.0; // above everything
+    fog.position.x = FW / 2 - MARGIN + W / 2 - W / 2;  // center over map
+    fog.position.x = W / 2;  // mesh center = map center
+    fog.position.y = 3.5; // above buildings (TC max height ~5.6 but fog layer can be higher than buildings)
     fog.position.z = H / 2;
+    // Offset because the mesh is centered but we want it to cover [−MARGIN, W+MARGIN]
+    fog.position.x = (W + 0) / 2;
+    fog.position.z = (H + 0) / 2;
+    // Recenter: mesh local origin is at its center, which should be at world (W/2, z, H/2)
+    // The mesh goes from world x = W/2 - FW/2 = W/2 - W/2 - MARGIN = -MARGIN to W/2 + FW/2 = W + MARGIN
+    // That's exactly right — covers map [0..W] with MARGIN overhang on each side.
 
     const mat = new BABYLON.StandardMaterial("fogMat", this.scene);
     mat.diffuseColor = new BABYLON.Color3(0, 0, 0);
@@ -445,58 +556,75 @@ class Scene3D {
     fog.material = mat;
     fog.hasVertexAlpha = true; // REQUIRED for per-vertex alpha to work
 
-    const vertsPerSide = W + 1;
-    this._fogColors = new Float32Array(vertsPerSide * vertsPerSide * 4);
-    this._fogMesh = fog;
+    const vertsPerSide = SUB + 1;
+    this._fogColors   = new Float32Array(vertsPerSide * vertsPerSide * 4);
+    this._fogMesh     = fog;
+    this._fogMargin   = MARGIN;
+    this._fogFW       = FW;
+    this._fogSub      = SUB;
 
-    // Init fully black
+    // Init fully opaque black
     for (let i = 0; i < this._fogColors.length; i += 4) {
       this._fogColors[i]     = 0.04;
       this._fogColors[i + 1] = 0.03;
       this._fogColors[i + 2] = 0.05;
-      this._fogColors[i + 3] = 1.0; // fully opaque black
+      this._fogColors[i + 3] = 1.0;
     }
     fog.setVerticesData(BABYLON.VertexBuffer.ColorKind, this._fogColors, true);
   }
 
   _updateFogPlane() {
     if (!this._fogMesh || !this._fogColors) return;
-    if (this.game.fog.disabled) {
-      // No fog — make fully transparent
-      for (let i = 0; i < this._fogColors.length; i += 4) {
-        this._fogColors[i + 3] = 0;
+
+    const MARGIN = this._fogMargin || 24;
+    const FW     = this._fogFW    || (MAP_W + MARGIN * 2);
+    const vertsPerSide = FW + 1;
+    const fogSys = this.game.fog;
+    let changed  = false;
+
+    // When fog is disabled, make the entire plane transparent so the map is fully visible
+    if (fogSys.disabled) {
+      let needFlush = false;
+      for (let i = 3; i < this._fogColors.length; i += 4) {
+        if (this._fogColors[i] !== 0) { this._fogColors[i] = 0; needFlush = true; }
       }
-      this._fogMesh.setVerticesData(BABYLON.VertexBuffer.ColorKind, this._fogColors, true);
+      if (needFlush) this._fogMesh.setVerticesData(BABYLON.VertexBuffer.ColorKind, this._fogColors, true);
       return;
     }
 
-    const W = MAP_W, vertsPerSide = W + 1;
-    const fog = this.game.fog;
-    let changed = false;
-
     for (let row = 0; row < vertsPerSide; row++) {
       for (let col = 0; col < vertsPerSide; col++) {
-        const tx = Math.min(W - 1, col);
-        const ty = Math.min(vertsPerSide - 2, row);
         const vi = row * vertsPerSide + col;
         const ci = vi * 4;
 
-        const fogState = fog.getState(tx, ty);
+        // Map vertex → tile coord.
+        // Babylon.js CreateGround vertex (col,row) has world-Z = fogPos.z + (FH/2 - row) = 88-row
+        // Terrain also has Z-flip: terrain tile ty maps to world-z = H - ty
+        // So fog vertex z_world = 88 - row → tile ty = MAP_H + MARGIN - row → mapRow = MAP_H + MARGIN - 1 - row
+        const mapCol =                     col  - MARGIN;
+        const mapRow = (MAP_H + MARGIN - 1) - row;
+
         let alpha;
-        if (fogState === 2)      alpha = 0.0;   // visible — no fog
-        else if (fogState === 1) alpha = 0.50;  // explored — grey shroud
-        else                     alpha = 0.92;  // unseen — near black
+        if (mapCol < 0 || mapCol >= MAP_W || mapRow < 0 || mapRow >= MAP_H) {
+          // Outside map boundary — always fully opaque (hides sky beyond map edge)
+          alpha = 1.0;
+        } else {
+          const tx = mapCol;
+          const ty = mapRow;
+          const fogState = fogSys.getState(tx, ty);
+          if (fogState === 2)      alpha = 0.0;   // visible
+          else if (fogState === 1) alpha = 0.50;  // explored shroud
+          else                     alpha = 0.92;  // unseen
+        }
 
         const prev = this._fogColors[ci + 3];
         if (Math.abs(prev - alpha) > 0.005) {
-          // Smooth lerp towards target (faster = 0.15)
           this._fogColors[ci + 3] = prev + (alpha - prev) * 0.15;
           changed = true;
         }
-        // Dark color under the fog
-        this._fogColors[ci]     = 0.05;
-        this._fogColors[ci + 1] = 0.04;
-        this._fogColors[ci + 2] = 0.06;
+        this._fogColors[ci]     = 0.04;
+        this._fogColors[ci + 1] = 0.03;
+        this._fogColors[ci + 2] = 0.05;
       }
     }
 
@@ -694,51 +822,179 @@ class Scene3D {
   _getOrCreateUnit(unit) {
     if (this._unitMeshes.has(unit.id)) return this._unitMeshes.get(unit.id);
 
-    const pid  = unit.playerId;
-    const pc   = this._getPlayerColor(pid);
-    const cls  = unit.unitClass;
+    const pid = unit.playerId;
+    const pc  = this._getPlayerColor(pid);
+    const cls = unit.unitClass;
+    const typ = unit.type;
+    const id  = unit.id;
 
-    // Body shape varies by unit class
-    let bodyH = 0.72, bodyR = 0.22;
-    if (cls === 'cavalry')  { bodyH = 0.90; bodyR = 0.28; }
-    if (cls === 'siege')    { bodyH = 0.60; bodyR = 0.45; }
-    if (cls === 'hero')     { bodyH = 0.88; bodyR = 0.26; }
-
-    const body = BABYLON.MeshBuilder.CreateCylinder(`u${unit.id}_body`, {
-      height: bodyH, diameter: bodyR * 2, tessellation: 8
-    }, this.scene);
-
-    const head = BABYLON.MeshBuilder.CreateSphere(`u${unit.id}_head`, {
-      diameter: bodyR * 1.5, segments: 4
-    }, this.scene);
-    head.parent = body;
-    head.position.y = bodyH * 0.65;
-
-    // Material with player color
-    const mat = new BABYLON.StandardMaterial(`u${unit.id}_mat`, this.scene);
+    const mat = new BABYLON.StandardMaterial(`u${id}_mat`, this.scene);
     mat.diffuseColor  = pc;
-    mat.specularColor = new BABYLON.Color3(0.2, 0.2, 0.2);
-    body.material = mat;
-    head.material = mat;
+    mat.specularColor = new BABYLON.Color3(0.25, 0.25, 0.25);
 
-    body.receiveShadows = true;
-    this._shadows.addShadowCaster(body);
+    const skin = new BABYLON.StandardMaterial(`u${id}_skin`, this.scene);
+    skin.diffuseColor  = new BABYLON.Color3(0.88, 0.72, 0.52);
+    skin.specularColor = new BABYLON.Color3(0.1, 0.08, 0.06);
 
-    // Selection ring (flat cylinder, hidden by default)
-    const ring = BABYLON.MeshBuilder.CreateTorus(`u${unit.id}_ring`, {
-      diameter: bodyR * 3.5, thickness: 0.06, tessellation: 20
+    const dark = new BABYLON.StandardMaterial(`u${id}_dark`, this.scene);
+    dark.diffuseColor  = pc.scale(0.55);
+    dark.specularColor = new BABYLON.Color3(0.1, 0.1, 0.1);
+
+    let root;
+    let ringRadius = 0.5;
+
+    if (cls === 'cavalry') {
+      // Horse body (elongated box) + rider (cylinder)
+      root = new BABYLON.Mesh(`u${id}_root`, this.scene);
+      const horse = BABYLON.MeshBuilder.CreateBox(`u${id}_horse`, {
+        width: 0.60, height: 0.35, depth: 0.28
+      }, this.scene);
+      horse.position.y = 0.30;
+      horse.parent = root;
+      horse.material = dark;
+      // Rider torso
+      const torso = BABYLON.MeshBuilder.CreateCylinder(`u${id}_torso`, {
+        height: 0.42, diameterTop: 0.22, diameterBottom: 0.26, tessellation: 7
+      }, this.scene);
+      torso.position.y = 0.70;
+      torso.parent = root;
+      torso.material = mat;
+      // Head
+      const hd = BABYLON.MeshBuilder.CreateSphere(`u${id}_hd`, { diameter: 0.22, segments: 4 }, this.scene);
+      hd.position.y = 1.05;
+      hd.parent = root;
+      hd.material = skin;
+      // Legs (4 horse legs)
+      [[-0.20, -0.24], [0.20, -0.24], [-0.20, 0.24], [0.20, 0.24]].forEach(([lx, lz], i) => {
+        const leg = BABYLON.MeshBuilder.CreateCylinder(`u${id}_leg${i}`, {
+          height: 0.30, diameter: 0.08, tessellation: 5
+        }, this.scene);
+        leg.position.set(lx, 0.08, lz);
+        leg.parent = root;
+        leg.material = dark;
+      });
+      ringRadius = 0.7;
+
+    } else if (cls === 'siege' || typ === 'TREBUCHET' || typ === 'TANK') {
+      // Machine: wide box body with detail
+      root = new BABYLON.Mesh(`u${id}_root`, this.scene);
+      const chassis = BABYLON.MeshBuilder.CreateBox(`u${id}_chassis`, {
+        width: 0.80, height: 0.30, depth: 0.55
+      }, this.scene);
+      chassis.position.y = 0.22;
+      chassis.parent = root;
+      const chassisMat = new BABYLON.StandardMaterial(`u${id}_ch`, this.scene);
+      chassisMat.diffuseColor = new BABYLON.Color3(0.40, 0.38, 0.35);
+      chassis.material = chassisMat;
+      // Barrel / arm
+      const arm = BABYLON.MeshBuilder.CreateCylinder(`u${id}_arm`, {
+        height: 0.75, diameter: 0.10, tessellation: 6
+      }, this.scene);
+      arm.position.set(0.28, 0.52, 0);
+      arm.rotation.z = -Math.PI / 4;
+      arm.parent = root;
+      arm.material = mat;
+      // Wheels (2 visible)
+      [[-0.35, 0], [0.35, 0]].forEach(([wx, wz], i) => {
+        const wheel = BABYLON.MeshBuilder.CreateCylinder(`u${id}_wh${i}`, {
+          height: 0.08, diameter: 0.28, tessellation: 10
+        }, this.scene);
+        wheel.rotation.z = Math.PI / 2;
+        wheel.position.set(wx, 0.14, 0);
+        wheel.parent = root;
+        wheel.material = dark;
+      });
+      ringRadius = 0.7;
+
+    } else if (cls === 'hero') {
+      // Hero: taller warrior with crown glow
+      root = new BABYLON.Mesh(`u${id}_root`, this.scene);
+      const torso = BABYLON.MeshBuilder.CreateCylinder(`u${id}_torso`, {
+        height: 0.56, diameterTop: 0.26, diameterBottom: 0.30, tessellation: 8
+      }, this.scene);
+      torso.position.y = 0.38;
+      torso.parent = root;
+      torso.material = mat;
+      // Cape (triangular flat box)
+      const cape = BABYLON.MeshBuilder.CreateBox(`u${id}_cape`, {
+        width: 0.38, height: 0.55, depth: 0.06
+      }, this.scene);
+      cape.position.set(0, 0.38, -0.16);
+      cape.parent = root;
+      const capeMat = new BABYLON.StandardMaterial(`u${id}_capeM`, this.scene);
+      capeMat.diffuseColor = pc.scale(0.75);
+      cape.material = capeMat;
+      // Head
+      const hd = BABYLON.MeshBuilder.CreateSphere(`u${id}_hd`, { diameter: 0.26, segments: 5 }, this.scene);
+      hd.position.y = 0.82;
+      hd.parent = root;
+      hd.material = skin;
+      // Crown (small box on head, golden)
+      const crown = BABYLON.MeshBuilder.CreateBox(`u${id}_crown`, {
+        width: 0.26, height: 0.10, depth: 0.26
+      }, this.scene);
+      crown.position.y = 0.98;
+      crown.parent = root;
+      const goldMat = new BABYLON.StandardMaterial(`u${id}_gold`, this.scene);
+      goldMat.diffuseColor  = new BABYLON.Color3(1.0, 0.85, 0.2);
+      goldMat.emissiveColor = new BABYLON.Color3(0.3, 0.22, 0.0);
+      crown.material = goldMat;
+      ringRadius = 0.55;
+
+    } else {
+      // Infantry / villager / archer — humanoid figure
+      root = new BABYLON.Mesh(`u${id}_root`, this.scene);
+      // Legs
+      const legs = BABYLON.MeshBuilder.CreateCylinder(`u${id}_legs`, {
+        height: 0.32, diameter: 0.22, tessellation: 6
+      }, this.scene);
+      legs.position.y = 0.16;
+      legs.parent = root;
+      legs.material = dark;
+      // Torso
+      const torso = BABYLON.MeshBuilder.CreateCylinder(`u${id}_torso`, {
+        height: 0.36, diameterTop: 0.24, diameterBottom: 0.22, tessellation: 7
+      }, this.scene);
+      torso.position.y = 0.50;
+      torso.parent = root;
+      torso.material = mat;
+      // Head
+      const hd = BABYLON.MeshBuilder.CreateSphere(`u${id}_hd`, { diameter: 0.22, segments: 4 }, this.scene);
+      hd.position.y = 0.78;
+      hd.parent = root;
+      hd.material = skin;
+      // Weapon stub for infantry/archer
+      if (cls === 'infantry' || cls === 'archer') {
+        const wpn = BABYLON.MeshBuilder.CreateCylinder(`u${id}_wpn`, {
+          height: 0.60, diameter: 0.04, tessellation: 4
+        }, this.scene);
+        wpn.position.set(0.16, 0.55, 0);
+        wpn.parent = root;
+        const wpnMat = new BABYLON.StandardMaterial(`u${id}_wpnM`, this.scene);
+        wpnMat.diffuseColor = new BABYLON.Color3(0.62, 0.52, 0.30);
+        wpn.material = wpnMat;
+      }
+      ringRadius = 0.42;
+    }
+
+    root.receiveShadows = true;
+    this._shadows.addShadowCaster(root);
+
+    // Selection ring
+    const ring = BABYLON.MeshBuilder.CreateTorus(`u${id}_ring`, {
+      diameter: ringRadius * 2, thickness: 0.055, tessellation: 22
     }, this.scene);
-    ring.parent = body;
-    ring.position.y = -bodyH * 0.5 + 0.02;
+    ring.parent = root;
+    ring.position.y = 0.02;
     ring.rotation.x = Math.PI / 2;
-    const ringMat = new BABYLON.StandardMaterial(`u${unit.id}_ringMat`, this.scene);
+    const ringMat = new BABYLON.StandardMaterial(`u${id}_ringMat`, this.scene);
     ringMat.diffuseColor   = new BABYLON.Color3(0, 1, 0.4);
     ringMat.emissiveColor  = new BABYLON.Color3(0, 0.6, 0.3);
     ringMat.disableLighting = true;
     ring.material = ringMat;
     ring.isVisible = false;
 
-    const meshGroup = { root: body, ring };
+    const meshGroup = { root, ring, ringRadius };
     this._unitMeshes.set(unit.id, meshGroup);
     return meshGroup;
   }
@@ -858,7 +1114,6 @@ class Scene3D {
 
   _syncBuildings() {
     const game = this.game;
-    const S    = TILE_SIZE;
 
     for (const b of game.buildings) {
       if (b.dead) {
@@ -877,10 +1132,44 @@ class Scene3D {
       mesh.position.z = cy;
       mesh.position.y = 0;
 
+      // Fog state — only applies to enemy buildings (player's own always visible)
+      const fogState = game.fog.disabled || b.playerId === 0
+        ? 2
+        : game.fog.getState(b.tileX + Math.floor(b.def.size / 2), b.tileY + Math.floor(b.def.size / 2));
+
+      if (fogState === 0) {
+        // Completely unseen — hide (fog plane covers it)
+        mesh.setEnabled(false);
+        continue;
+      }
+      mesh.setEnabled(true);
+
       // Fade in while under construction
-      const alpha = b.built ? 1.0 : 0.4 + (b.buildProgress / b.buildTime) * 0.6;
+      const baseAlpha = b.built ? 1.0 : 0.4 + (b.buildProgress / b.buildTime) * 0.6;
+      // Shroud: semi-transparent grey tint to indicate explored-but-not-visible
+      const visib = fogState === 1 ? 0.5 : baseAlpha;
+
       mesh.getChildren(undefined, false).forEach(child => {
-        if (child.material) child.material.alpha = alpha;
+        if (!child.material) return;
+        child.visibility = visib;
+        // Cache original diffuse on first encounter
+        if (!child._origDiffuse && child.material.diffuseColor) {
+          child._origDiffuse = child.material.diffuseColor.clone();
+        }
+        if (child._origDiffuse) {
+          if (fogState === 1) {
+            // Desaturate toward grey for shroud
+            const c = child._origDiffuse;
+            const grey = (c.r + c.g + c.b) / 3;
+            child.material.diffuseColor = new BABYLON.Color3(
+              c.r * 0.4 + grey * 0.3,
+              c.g * 0.4 + grey * 0.3,
+              c.b * 0.4 + grey * 0.3
+            );
+          } else {
+            child.material.diffuseColor = child._origDiffuse.clone();
+          }
+        }
       });
     }
   }
@@ -904,11 +1193,11 @@ class Scene3D {
       g.root.position.x = u.x / S;
       g.root.position.z = u.y / S;
 
-      // Slight bob animation for moving units
+      // Slight bob animation for moving units (root sits at ground level now)
       if (u.state === UNIT_STATE.MOVING || u.state === UNIT_STATE.GATHERING) {
-        g.root.position.y = 0.36 + Math.abs(Math.sin(performance.now() / 150 + u.id)) * 0.06;
+        g.root.position.y = Math.abs(Math.sin(performance.now() / 150 + u.id)) * 0.05;
       } else {
-        g.root.position.y = 0.36;
+        g.root.position.y = 0;
       }
 
       // Face direction of movement
@@ -932,16 +1221,17 @@ class Scene3D {
       }
 
       // HP bar as thin box above unit (updated every frame)
+      const hpBarY = u.unitClass === 'cavalry' ? 1.35 : u.unitClass === 'siege' ? 0.75 : 1.05;
       if (!g.hpBg) {
         g.hpBg = BABYLON.MeshBuilder.CreateBox(`u${u.id}_hpbg`, { width: 0.5, height: 0.04, depth: 0.04 }, this.scene);
         g.hpBg.parent = g.root;
-        g.hpBg.position.y = 0.7;
+        g.hpBg.position.y = hpBarY;
         g.hpBg.material = this._getMat("hpBgMat", new BABYLON.Color3(0.2, 0.05, 0.05));
         g.hpBg.material.disableLighting = true;
 
         g.hpFg = BABYLON.MeshBuilder.CreateBox(`u${u.id}_hpfg`, { width: 0.5, height: 0.04, depth: 0.06 }, this.scene);
         g.hpFg.parent = g.root;
-        g.hpFg.position.y = 0.72;
+        g.hpFg.position.y = hpBarY + 0.02;
         g.hpFg.material = new BABYLON.StandardMaterial(`u${u.id}_hpfgM`, this.scene);
         g.hpFg.material.diffuseColor = new BABYLON.Color3(0.1, 0.9, 0.1);
         g.hpFg.material.disableLighting = true;
